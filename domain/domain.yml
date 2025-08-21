@@ -17,6 +17,28 @@ slots:
   saleor_last_queries:
     type: text
     influence_conversation: false
+  kg_message:
+    type: text
+  kg_products:
+    type: list
+  kg_specs_by_product:
+    type: any
+  kg_sources:
+    type: list
+  kg_raw_response:
+    type: any
+  kg_error:
+    type: text
+  kg_document_names:
+    type: text   # optional, e.g., "fileA.pdf,fileB.pdf"
+  
+  # KG control + outputs
+  kg_mode:
+    type: text
+    influence_conversation: false
+    mappings:
+      - type: custom
+
 
 responses:
   utter_ask_product_name:
@@ -26,3 +48,4 @@ responses:
 
 actions:
   - action_saleor_graphql
+  - action_query_knowledge_graph

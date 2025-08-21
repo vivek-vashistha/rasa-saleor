@@ -1,6 +1,6 @@
 flows:
   product_pricing:
-    description: Answer questions about a product's price (and currency) using Saleor GraphQL.
+    description: "Answer questions about a product's price (and currency) using Saleor GraphQL."
     steps:
       - collect: product_name
         description: "The product name or keywords."
@@ -9,7 +9,7 @@ flows:
       - action: action_saleor_graphql
 
   product_availability:
-    description: Tell the user whether a product is published or available for purchase in the specified channel.
+    description: "Tell the user whether a product is published or available for purchase in the specified channel."
     steps:
       - collect: product_name
         description: "Name/keywords of the product."
@@ -18,10 +18,28 @@ flows:
       - action: action_saleor_graphql
 
   user_account_info:
-    description: Provide information related to the signed-in user (e.g., orders or addresses) by querying Saleor.
+    description: "Provide information related to the signed-in user (e.g., orders or addresses) by querying Saleor."
     steps:
       - collect: user_identifier
         description: "Email or account ID; only collect if the user asks about their own data."
       - set_slots:
           - saleor_question_type: "user_info"
       - action: action_saleor_graphql
+
+  product_specs:
+    description: "Use the Knowledge Graph for product facts (descriptions, benefits, ingredients, features, specs, categories, types)."
+    steps:
+      - collect: product_name
+        description: "The product name or keywords if not already clear."
+      - set_slots:
+          - kg_mode: "graph_vector_fulltext"
+      - action: action_query_knowledge_graph
+
+  product_compatibility:
+    description: "Use the Knowledge Graph to check similar/compatible products or technical compatibility info."
+    steps:
+      - collect: product_name
+        description: "The primary product (and accessory if mentioned)."
+      - set_slots:
+          - kg_mode: "graph_vector_fulltext"
+      - action: action_query_knowledge_graph
