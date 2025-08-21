@@ -1,0 +1,27 @@
+flows:
+  product_pricing:
+    description: Answer questions about a product's price (and currency) using Saleor GraphQL.
+    steps:
+      - collect: product_name
+        description: "The product name or keywords."
+      - set_slots:
+          - saleor_question_type: "price"
+      - action: action_saleor_graphql
+
+  product_availability:
+    description: Tell the user whether a product is published or available for purchase in the specified channel.
+    steps:
+      - collect: product_name
+        description: "Name/keywords of the product."
+      - set_slots:
+          - saleor_question_type: "availability"
+      - action: action_saleor_graphql
+
+  user_account_info:
+    description: Provide information related to the signed-in user (e.g., orders or addresses) by querying Saleor.
+    steps:
+      - collect: user_identifier
+        description: "Email or account ID; only collect if the user asks about their own data."
+      - set_slots:
+          - saleor_question_type: "user_info"
+      - action: action_saleor_graphql

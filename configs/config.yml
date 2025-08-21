@@ -1,0 +1,11 @@
+recipe: default.v1
+language: en
+assistant_id: saleor_assistant_min
+
+pipeline:
+  - name: CompactLLMCommandGenerator
+    llm:
+      model_group: openai-direct
+
+policies:
+  - name: FlowPolicy

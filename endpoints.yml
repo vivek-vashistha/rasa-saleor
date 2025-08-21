@@ -1,0 +1,12 @@
+# Where the custom actions run
+action_endpoint:
+  url: "http://localhost:5055/webhook"
+
+# LLM model(s) used by Rasa components (e.g., Command Generator)
+# Declare model groups (provider, model, api_key via env var)
+model_groups:
+  - id: openai-direct
+    models:
+      - provider: openai
+        model: gpt-4o-mini
+        api_key: ${OPENAI_API_KEY}

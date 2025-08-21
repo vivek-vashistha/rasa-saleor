@@ -1,0 +1,28 @@
+version: "3.1"
+
+slots:
+  product_name:
+    type: text
+  user_identifier:
+    type: text
+  saleor_question_type:   # "price" | "availability" | "user_info"
+    type: text
+  channel_slug:
+    type: text
+    initial_value: "default-channel"   # action will prefer slot, else env
+    influence_conversation: false
+  saleor_last_answer:
+    type: text
+    influence_conversation: false
+  saleor_last_queries:
+    type: text
+    influence_conversation: false
+
+responses:
+  utter_ask_product_name:
+    - text: "Which product are you asking about?"
+  utter_ask_user_identifier:
+    - text: "What is your account email or ID?"
+
+actions:
+  - action_saleor_graphql

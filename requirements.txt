@@ -1,0 +1,7 @@
+rasa-pro==3.12.13
+# rasa-sdk>=3.7
+langchain-openai
+langchain-community
+graphql-core
+gql[requests]
+python-dotenv    # optional if you prefer .env files
