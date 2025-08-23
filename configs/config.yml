@@ -6,6 +6,7 @@ pipeline:
   - name: CompactLLMCommandGenerator
     llm:
       model_group: openai-direct
+    # prompt: prompts/command-generator.jinja2
 
 policies:
   - name: FlowPolicy

@@ -31,8 +31,9 @@ def ask_chatbot(
 
 if __name__ == "__main__":
     ask_chatbot(
-        uri="neo4j+s://mkmm.databases.neo4j.io",
-        userName="neo4j",
-        password="kkkkk",
-        question="What juices are there?",
+        uri=os.getenv("NEO4J_URI"),
+        userName=os.getenv("NEO4J_USERNAME"),
+        password=os.getenv("NEO4J_PASSWORD"),
+        # question="What juices are there?",
+        question="can you suggest me some healthy drinks",
     )

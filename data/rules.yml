@@ -1,0 +1,22 @@
+rules:
+  - rule: Catalog discovery goes to KG
+    steps:
+      - intent: inform_catalog   # e.g., "what types of juices are there", "show juices"
+      - action: action_query_knowledge_graph
+
+  # - rule: Fallback goes to KG
+  #   steps:
+  #     - intent: nlu_fallback
+  #     - action: action_query_knowledge_graph
+  - rule: Questions listing products go to KG
+    steps:
+      - intent: inform_catalog    # map examples like: "what types of <product> are there?", "what different juices are there?"
+      - action: action_query_knowledge_graph
+
+  - rule: Follow-up pricing uses memory
+    condition:
+      - slot_was_set:
+          - context_products
+    steps:
+      - intent: ask_price         # e.g., "and their prices?"
+      - action: action_saleor_graphql

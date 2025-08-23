@@ -1,9 +1,16 @@
 flows:
+  kg_freeform_qa:
+    description: "Answer any free-form user question using the Knowledge Graph."
+    steps:
+      - set_slots:
+          - kg_mode: "graph_vector_fulltext"
+      - action: action_query_knowledge_graph
+
   product_pricing:
     description: "Answer questions about a product's price (and currency) using Saleor GraphQL."
     steps:
       - collect: product_name
-        description: "The product name or keywords."
+        description: "The product name or keywords or the product ID or the KG suggested products lists or a single product."
       - set_slots:
           - saleor_question_type: "price"
       - action: action_saleor_graphql
@@ -12,7 +19,7 @@ flows:
     description: "Tell the user whether a product is published or available for purchase in the specified channel."
     steps:
       - collect: product_name
-        description: "Name/keywords of the product."
+        description: "Name/keywords of the product or the product ID or the KG suggested products lists or a single product."
       - set_slots:
           - saleor_question_type: "availability"
       - action: action_saleor_graphql
@@ -30,7 +37,7 @@ flows:
     description: "Use the Knowledge Graph for product facts (descriptions, benefits, ingredients, features, specs, categories, types)."
     steps:
       - collect: product_name
-        description: "The product name or keywords if not already clear."
+        description: "The product name or keywords or the product ID or the KG suggested products lists or a single product."
       - set_slots:
           - kg_mode: "graph_vector_fulltext"
       - action: action_query_knowledge_graph
@@ -39,7 +46,7 @@ flows:
     description: "Use the Knowledge Graph to check similar/compatible products or technical compatibility info."
     steps:
       - collect: product_name
-        description: "The primary product (and accessory if mentioned)."
+        description: "The primary product (and accessory if mentioned) or the product ID or the KG suggested products lists or a single product."
       - set_slots:
           - kg_mode: "graph_vector_fulltext"
       - action: action_query_knowledge_graph

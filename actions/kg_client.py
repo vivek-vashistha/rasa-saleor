@@ -65,15 +65,24 @@ class KGClient:
             "email": email,
         }
         try:
-            resp = requests.post(self.endpoint, data=data, timeout=60)
+            resp = requests.post(self.endpoint, data=data, timeout=self.timeout)
             resp.raise_for_status()
             return resp.json()
+        # except Exception as e:
+        #     # bubble up a helpful message for the action
+        #     body = getattr(e, "response", None)
+        #     body = getattr(body, "text", "") if body is not None else ""
+        #     logger.exception("KG request failed: %s | body=%s", e, body)
+        #     raise
+
+        except requests.exceptions.HTTPError as e:
+            status = getattr(e.response, "status_code", "unknown")
+            body = getattr(e.response, "text", "")
+            logger.exception("KG HTTP %s: %s", status, body)
+            raise RuntimeError(f"KG HTTP {status}: {body}") from e
         except Exception as e:
-            # bubble up a helpful message for the action
-            body = getattr(e, "response", None)
-            body = getattr(body, "text", "") if body is not None else ""
-            logger.exception("KG request failed: %s | body=%s", e, body)
-            raise
+            logger.exception("KG request failed: %s", e)
+            raise RuntimeError(f"KG request failed: {repr(e)}") from e
 
     # ---------- Convenience extractors (purely optional) ----------
 

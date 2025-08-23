@@ -19,6 +19,7 @@ SALEOR_TOKEN    = os.getenv("SALEOR_TOKEN", "")
 CHANNEL_SLUG    = os.getenv("CHANNEL_SLUG", "default-channel")
 OPENAI_MODEL    = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
 OPENAI_TEMP     = float(os.getenv("OPENAI_TEMPERATURE", "0"))
+DEV_VERBOSE     = os.getenv("DEV_VERBOSE_ERRORS", "0") == "1"
 
 headers = {"Authorization": f"Bearer {SALEOR_TOKEN}"} if SALEOR_TOKEN else None
 
@@ -126,7 +127,9 @@ def _invoke_graphql(tool_input: str):
             return graphql_tool_with_schema.invoke(query)
         except Exception as e2:
             # Surface the original error context for logs
-            raise e2
+            # raise e2
+            # Surface the full context for logs & (optionally) the user
+            raise RuntimeError(f"GraphQL failed. No-schema error: {repr(e)} | With-schema error: {repr(e2)}")
 
 def _tool_loop(user_task: str, max_iters: int = 4) -> dict:
     messages = [SystemMessage(content=SYSTEM_PROMPT), HumanMessage(content=user_task)]
@@ -191,25 +194,72 @@ class ActionSaleorGraphQL(Action):
         channel = (tracker.get_slot("channel_slug") or CHANNEL_SLUG).strip()
         user_id = (tracker.get_slot("user_identifier") or "").strip()
         user_text = (tracker.latest_message.get("text") or "").strip()
+        kg_products = tracker.get_slot("kg_products") or []
 
+        # If user asked for prices/availability but didn't name products explicitly,
+        # fall back to KG-derived products from the previous turn.
+        wants_prices = bool(re.search(r"\b(price|prices|cost|buy|purchase|available|availability|in stock)\b", user_text, re.I))
+        wants_avail  = bool(re.search(r"\b(available|availability|in stock|stock|purchase|buy)\b", user_text, re.I))
+
+        # If qtype not provided by NLU/form, infer from text
+        if not qtype:
+            if wants_prices and wants_avail:
+                qtype = "product_price_and_availability"
+            elif wants_prices:
+                qtype = "product_pricing"
+            elif wants_avail:
+                qtype = "product_availability"
+
+        # Build task string depending on slots
         if qtype and product:
             task = f"{qtype} for product '{product}' in channel '{channel}'."
         elif product:
-            task = f"Product info (price & availability) for '{product}' in channel '{channel}'."
+            if qtype == "product_pricing":
+                task = f"Pricing only for '{product}' in channel '{channel}'. Return currency and clearly name each product."
+            elif qtype == "product_availability":
+                task = f"Availability/publication only for '{product}' in channel '{channel}'."
+            else:
+                task = f"Product info (price & availability) for '{product}' in channel '{channel}'. Return currency and clearly name each product."
         elif qtype == "user_info" and user_id:
             task = f"User information for '{user_id}' (orders, addresses, availability to purchase)."
         else:
             task = user_text or "Answer the user's question using Saleor GraphQL."
 
         try:
-            result = _tool_loop(task)
-            dispatcher.utter_message(text=result["answer"])
-            return [
-                SlotSet("saleor_last_answer", result["answer"]),
-                SlotSet("saleor_last_queries", json.dumps(result["queries"])),
-                SlotSet("channel_slug", channel),
-            ]
+            # Case 1: multiple KG products, no explicit product slot
+            if not product and kg_products and (wants_prices or not qtype):
+                results, queries = [], []
+                for prod in kg_products:
+                    task = f"{qtype or 'product_info'} for product '{prod}' in channel '{channel}'."
+                    res = _tool_loop(task)
+                    results.append(res["answer"])
+                    queries.extend(res["queries"])
+
+                final_answer = "\n".join(results)
+                dispatcher.utter_message(text=final_answer)
+                return [
+                    SlotSet("saleor_last_answer", final_answer),
+                    SlotSet("saleor_last_queries", json.dumps(queries)),
+                    SlotSet("channel_slug", channel),
+                ]
+
+            # Case 2: single product or general query
+            else:
+                result = _tool_loop(task)
+                dispatcher.utter_message(text=result["answer"])
+                return [
+                    SlotSet("saleor_last_answer", result["answer"]),
+                    SlotSet("saleor_last_queries", json.dumps(result["queries"])),
+                    SlotSet("channel_slug", channel),
+                ]
+
         except Exception as e:
             log.exception("Saleor GraphQL action failed: %s", e)
-            dispatcher.utter_message(text="I’m having trouble reaching the catalog service right now. Please try again.")
-            return []
+            err_msg = f"I couldn’t complete the catalog query."
+            if DEV_VERBOSE:
+                err_msg += f" Details: {e}"
+            dispatcher.utter_message(text=err_msg)
+            return [
+                SlotSet("saleor_last_error", str(e)),
+                SlotSet("saleor_last_queries", tracker.get_slot("saleor_last_queries")),
+            ]

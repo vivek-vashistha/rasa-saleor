@@ -19,20 +19,32 @@ slots:
     influence_conversation: false
   kg_message:
     type: text
-  kg_products:
-    type: list
-  kg_specs_by_product:
-    type: any
-  kg_sources:
-    type: list
+    influence_conversation: true
   kg_raw_response:
     type: any
+    influence_conversation: false
   kg_error:
     type: text
+    influence_conversation: false
   kg_document_names:
     type: text   # optional, e.g., "fileA.pdf,fileB.pdf"
-  
-  # KG control + outputs
+    influence_conversation: false
+  kg_products:
+    type: list
+    influence_conversation: true
+  kg_specs_by_product:
+    type: any
+    influence_conversation: false
+  kg_sources:
+    type: list
+    influence_conversation: false
+  context_products:
+    type: list
+    influence_conversation: true
+  saleor_last_error:
+    type: text
+    influence_conversation: false
+  # # KG control + outputs
   kg_mode:
     type: text
     influence_conversation: false
@@ -49,3 +61,7 @@ responses:
 actions:
   - action_saleor_graphql
   - action_query_knowledge_graph
+
+session_config:
+  session_expiration_time: 60
+  carry_over_slots_to_new_session: true

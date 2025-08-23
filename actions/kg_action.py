@@ -41,24 +41,35 @@ class ActionQueryKnowledgeGraph(Action):
             )
 
             # Normalize key bits for downstream use
-            msg = (
-                kg_json.get("data", {})
-                      .get("message")
-                or kg_json.get("message")
-                or ""
-            )
-            sources = (
-                kg_json.get("data", {})
-                       .get("info", {})
-                       .get("sources")
-                or []
-            )
+            # msg = (
+            #     kg_json.get("data", {})
+            #           .get("message")
+            #     or kg_json.get("message")
+            #     or ""
+            # )
+            # sources = (
+            #     kg_json.get("data", {})
+            #            .get("info", {})
+            #            .get("sources")
+            #     or []
+            # )
+
+            # Normalize for downstream steps (products, specs, message, sources)
+            summary = KGClient.short_summary(kg_json)
+            msg = summary.get("message", "") or ""
+            sources = summary.get("sources", []) or []
+            products = summary.get("products", []) or []
+            specs = summary.get("specs_by_product", {}) or {}
 
             events: List[EventType] = [
                 SlotSet("kg_message", msg),
                 SlotSet("kg_sources", sources),
+                SlotSet("kg_products", products),
+                SlotSet("kg_specs_by_product", specs),
                 SlotSet("kg_raw_response", kg_json),
-            ]
+                # keep a rolling context for follow-ups
+                SlotSet("context_products", products or tracker.get_slot("context_products") or []),
+             ]
 
             if msg:
                 dispatcher.utter_message(text=msg)
@@ -68,5 +79,5 @@ class ActionQueryKnowledgeGraph(Action):
 
         except Exception as e:
             logger.exception("KG action failed")
-            dispatcher.utter_message(text="Sorry — I couldn’t reach our knowledge graph right now.")
+            dispatcher.utter_message(text=f"Sorry — I couldn’t reach our knowledge graph right now. : {e}")
             return [SlotSet("kg_error", str(e))]
