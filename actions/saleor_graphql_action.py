@@ -1,265 +1,272 @@
-# actions/saleor_graphql_action.py
-import os, json, re, logging
+import os
+import json
+import re
+import logging
+import requests
+from typing import List, Dict, Any, Optional
 from dotenv import load_dotenv
-load_dotenv()
 
 from rasa_sdk import Action, Tracker
 from rasa_sdk.executor import CollectingDispatcher
 from rasa_sdk.events import SlotSet, EventType
 
-from langchain_openai import ChatOpenAI
-from langchain_core.messages import SystemMessage, HumanMessage, AIMessage, ToolMessage
-from langchain_community.utilities.graphql import GraphQLAPIWrapper
-from langchain_community.tools.graphql.tool import BaseGraphQLTool
+from .kg_client import KGClient
+
+load_dotenv()
 
 log = logging.getLogger(__name__)
 
-SALEOR_ENDPOINT = os.getenv("SALEOR_ENDPOINT", "")
-SALEOR_TOKEN    = os.getenv("SALEOR_TOKEN", "")
-CHANNEL_SLUG    = os.getenv("CHANNEL_SLUG", "default-channel")
-OPENAI_MODEL    = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
-OPENAI_TEMP     = float(os.getenv("OPENAI_TEMPERATURE", "0"))
-DEV_VERBOSE     = os.getenv("DEV_VERBOSE_ERRORS", "0") == "1"
+# Configuration from environment variables
+BACKEND_URL = os.getenv("BACKEND_URL", "http://localhost:8002/chat_bot")
+CHANNEL_SLUG = os.getenv("CHANNEL_SLUG", "default-channel")
+MODEL = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
+DEV_VERBOSE = os.getenv("DEV_VERBOSE_ERRORS", "0") == "1"
 
-headers = {"Authorization": f"Bearer {SALEOR_TOKEN}"} if SALEOR_TOKEN else None
 
-# Build two wrappers: prefer NO schema; keep a fallback WITH schema.
-graphql_wrapper_without_schema = GraphQLAPIWrapper(
-    graphql_endpoint=SALEOR_ENDPOINT,
-    custom_headers=headers,
-    fetch_schema_from_transport=False,
-)
-graphql_wrapper_with_schema = GraphQLAPIWrapper(
-    graphql_endpoint=SALEOR_ENDPOINT,
-    custom_headers=headers,
-    fetch_schema_from_transport=True,
-)
-
-saleor_tool_description = (
-    "Input is a valid Saleor GraphQL query/mutation string.\n"
-    f"- Channel context is \"{CHANNEL_SLUG}\". For pricing/availability/publication, use this channel.\n"
-    "- NEVER add arguments to 'channelListings'. Instead fetch the list and SELECT the item whose channel.slug "
-    f'equals \"{CHANNEL_SLUG}\".\n'
-    "- When searching, prefer: products(channel: \"<slug>\", filter: { search: \"keywords\" }, first: 10) { ... }\n"
-    "- For price ranges, use: pricing { priceRange { start { gross { amount currency } } stop { gross { amount currency } } } }\n"
-    "- Do not invent fields; stick to the schema."
-)
-
-graphql_tool_without_schema = BaseGraphQLTool(
-    graphql_wrapper=graphql_wrapper_without_schema,
-    description=saleor_tool_description,
-)
-graphql_tool_with_schema = BaseGraphQLTool(
-    graphql_wrapper=graphql_wrapper_with_schema,
-    description=saleor_tool_description,
-)
-
-try:
-    graphql_tool_without_schema.name = "query_graphql"
-    graphql_tool_with_schema.name = "query_graphql"
-except Exception:
-    pass
-
-llm = ChatOpenAI(model=OPENAI_MODEL, temperature=OPENAI_TEMP).bind_tools(
-    [graphql_tool_without_schema, graphql_tool_with_schema]
-)
-
-SYSTEM_PROMPT = f"""You are a Saleor shopping copilot for an online retailer.
-Use exactly ONE tool: query_graphql (you may call it multiple times).
-
-Follow these rules:
-- Channel context is "{CHANNEL_SLUG}". For pricing/availability/publication, use this channel.
-- NEVER put arguments on 'channelListings'. Instead fetch:
-    channelListings {{
-      channel {{ slug }}
-      isPublished
-      visibleInListings
-      availableForPurchaseAt
-      pricing {{
-        priceRange {{
-          start {{ gross {{ amount currency }} }}
-          stop  {{ gross {{ amount currency }} }}
-        }}
-      }}
-    }}
-  and use the entry where channel.slug == "{CHANNEL_SLUG}".
-- For product search, ALWAYS paginate:
-    products(channel: "{CHANNEL_SLUG}", filter: {{ search: "<keywords>" }}, first: 10) {{ ... }}
-- State the currency in your price answer. Do not invent fields.
-Return a short, helpful answer after you finish tool calls.
-"""
-
-# --- Query sanitizers for common schema pitfalls --------------------------------
-def _sanitize_query(q: str) -> str:
-    """Fix common issues before sending to Saleor."""
-    if not isinstance(q, str):
-        return q
-    fixed = q
-
-    # 1) Remove illegal args from channelListings(...)
-    fixed = re.sub(r'(channelListings)\s*\([^)]*\)', r'\1', fixed)
-
-    # 2) priceRange uses 'stop', not 'end'
-    fixed = re.sub(r'\bend\s*\{', 'stop {', fixed)
-
-    # 3) Ensure products(...) has first: or last:
-    # If products( ... ) lacks 'first:' or 'last:', inject first: 10 at the beginning.
-    def add_first(match):
-        inner = match.group(1)
-        if re.search(r'\b(first|last)\s*:', inner):
-            return f'products({inner})'
-        inner = inner.strip()
-        return 'products(first: 10' + (', ' + inner if inner else '') + ')'
-    fixed = re.sub(r'products\s*\(\s*([^)]+)\)', add_first, fixed)
-
-    # Tidy ', )' -> ')'
-    fixed = re.sub(r',\s*\)', ')', fixed)
-    return fixed
-
-def _invoke_graphql(tool_input: str):
-    """Prefer no-schema transport (avoids introspection error); if it fails, try with-schema."""
-    query = _sanitize_query(tool_input) if isinstance(tool_input, str) else tool_input
+def call_saleor_api(
+    question: str,
+    kg_products: Optional[List[str]] = None,
+    kg_response: Optional[Any] = None,
+    session_id: str = "rasa_bot",
+    channel: str = CHANNEL_SLUG
+) -> Dict[str, Any]:
+    """
+    Call the Saleor API endpoint with the given parameters.
+    
+    Args:
+        question: The user's question or query
+        kg_products: List of product names from knowledge graph
+        kg_response: Raw response from knowledge graph
+        session_id: Session ID for conversation tracking
+        channel: Channel slug for the request
+        
+    Returns:
+        Dict containing the API response with 'answer' and 'queries' keys
+    """
+    # Prepare the request data according to the API's expected format
+    data = {
+        "question": question,
+        "session_id": session_id,
+        "channel_slug": channel,
+        "additional_details": ""  # Required by API but can be empty
+    }
+    
+    # Add KG products if available - ensure it's a list of strings
+    if kg_products:
+        if isinstance(kg_products, str):
+            try:
+                kg_products = json.loads(kg_products)
+            except json.JSONDecodeError:
+                kg_products = [kg_products]  # Convert single string to list
+        
+        if isinstance(kg_products, list):
+            data["kg_products"] = json.dumps(kg_products)
+            log.info(f"Sending kg_products: {data['kg_products']}")
+    
+    # Add KG response if available - pass through as is
+    if kg_response is not None:
+        if isinstance(kg_response, (dict, list)):
+            data["kg_response"] = json.dumps(kg_response)
+        else:
+            data["kg_response"] = str(kg_response)
+        log.info(f"Sending kg_response: {data['kg_response']}")
+    
+    log.info(f"Calling API at {BACKEND_URL} with data: {json.dumps(data, indent=2)}")
+    
     try:
-        return graphql_tool_without_schema.invoke(query)
-    except Exception as e:
-        # As a fallback only, try the schema client (may log the includeDeprecated warning)
+        # Make the API request with a reasonable timeout
+        response = requests.post(
+            BACKEND_URL,
+            data=data,
+            headers={"Content-Type": "application/x-www-form-urlencoded"},
+            timeout=30
+        )
+        
+        log.info(f"API response status: {response.status_code}")
+        
+        # Try to parse JSON response
         try:
-            return graphql_tool_with_schema.invoke(query)
-        except Exception as e2:
-            # Surface the original error context for logs
-            # raise e2
-            # Surface the full context for logs & (optionally) the user
-            raise RuntimeError(f"GraphQL failed. No-schema error: {repr(e)} | With-schema error: {repr(e2)}")
+            response_data = response.json()
+            log.info(f"API response data: {json.dumps(response_data, indent=2)}")
+            
+            # Ensure the response has the expected format
+            if not isinstance(response_data, dict):
+                raise ValueError("Unexpected response format: not a JSON object")
+            
+            if response_data and isinstance(response_data, dict):
+                data = response_data.get("data", {})
+                answer_block = data.get("answer", "")
+            
+            # Extract the "Final response" part if present
+            final_answer = None
+            if "### Final response" in answer_block:
+                final_answer = answer_block.split("### Final response", 1)[1].strip()
 
-def _tool_loop(user_task: str, max_iters: int = 4) -> dict:
-    messages = [SystemMessage(content=SYSTEM_PROMPT), HumanMessage(content=user_task)]
-    tool_queries, last_ai = [], None
-
-    for _ in range(max_iters):
-        last_ai = llm.invoke(messages)
-        tool_calls = getattr(last_ai, "tool_calls", None)
-        if not tool_calls:
-            break
-
-        # Sanitize tool_calls so they are JSON-serializable when the messages are resent
-        sanitized_calls = []
-        for tc in tool_calls:
-            name = getattr(tc, "name", None) or (isinstance(tc, dict) and tc.get("name"))
-            call_id = getattr(tc, "id", None) or (isinstance(tc, dict) and tc.get("id"))
-            args = getattr(tc, "args", None) or (isinstance(tc, dict) and tc.get("args")) or {}
-            query_arg = args.get("query") if isinstance(args, dict) else None
-            if not query_arg and isinstance(args, dict):
-                query_arg = args.get("input")
-            if isinstance(query_arg, str):
-                safe_args = {"query": _sanitize_query(query_arg)}
-            elif isinstance(args, dict):
-                # Keep only JSON-serializable primitives, and ensure we have a query key
-                safe_args = {k: v for k, v in args.items() if isinstance(v, (str, int, float, bool)) or v is None}
-                if "query" not in safe_args:
-                    safe_args["query"] = str(query_arg) if query_arg is not None else str(args)
+            if final_answer:
+                print(f"Sending answer to user:\n{final_answer}")
             else:
-                safe_args = {"query": str(args)}
-            sanitized_calls.append({"name": name, "id": call_id, "args": safe_args})
+                print("Full answer block:\n", answer_block)
+                
+            return {
+                "answer": final_answer,
+                "queries": question
+            }
+            
+        except json.JSONDecodeError:
+            error_msg = f"Failed to parse API response as JSON: {response.text[:500]}"
+            log.error(error_msg)
+            return {
+                "answer": "I received an invalid response from the product catalog.",
+                "error": error_msg
+            }
+            
+    except requests.exceptions.RequestException as e:
+        error_msg = f"API request failed: {str(e)}"
+        log.error(error_msg)
+        if hasattr(e, 'response') and e.response is not None:
+            log.error(f"Response status: {e.response.status_code}")
+            log.error(f"Response text: {e.response.text}")
+        
+        return {
+            "answer": "I'm having trouble connecting to the product catalog. Please try again later.",
+            "error": error_msg
+        }
 
-        # Append sanitized assistant message (with sanitized tool calls)
-        messages.append(AIMessage(content=last_ai.content, tool_calls=sanitized_calls))
-
-        # Now execute tools and append their results
-        for tc in tool_calls:
-            args = getattr(tc, "args", None) or (isinstance(tc, dict) and tc.get("args")) or {}
-            # Prefer the raw GraphQL string from the tool call if present
-            query_arg = args.get("query") or args.get("input")
-            tool_input = query_arg if isinstance(query_arg, str) else args
-            res = _invoke_graphql(tool_input)
-            # Record only a serializable representation of the query to avoid non-JSON-serializable objects
-            if isinstance(query_arg, str):
-                tool_queries.append(_sanitize_query(query_arg))
-            elif isinstance(tool_input, str):
-                tool_queries.append(_sanitize_query(tool_input))
-            else:
-                tool_queries.append(str(args))
-            call_id = getattr(tc, "id", None) or (isinstance(tc, dict) and tc.get("id"))
-            messages.append(ToolMessage(content=str(res), tool_call_id=call_id))
-
-    answer_text = last_ai.content if last_ai else "Sorry, I couldn't generate an answer."
-    return {"answer": answer_text, "queries": tool_queries}
 
 class ActionSaleorGraphQL(Action):
     def name(self) -> str:
         return "action_saleor_graphql"
 
-    def run(self, dispatcher: CollectingDispatcher, tracker: Tracker, domain: dict) -> list[EventType]:
-        product = (tracker.get_slot("product_name") or "").strip()
-        qtype   = (tracker.get_slot("saleor_question_type") or "").strip()
-        channel = (tracker.get_slot("channel_slug") or CHANNEL_SLUG).strip()
-        user_id = (tracker.get_slot("user_identifier") or "").strip()
-        user_text = (tracker.latest_message.get("text") or "").strip()
-        kg_products = tracker.get_slot("kg_products") or []
-
-        # If user asked for prices/availability but didn't name products explicitly,
-        # fall back to KG-derived products from the previous turn.
-        wants_prices = bool(re.search(r"\b(price|prices|cost|buy|purchase|available|availability|in stock)\b", user_text, re.I))
-        wants_avail  = bool(re.search(r"\b(available|availability|in stock|stock|purchase|buy)\b", user_text, re.I))
-
-        # If qtype not provided by NLU/form, infer from text
-        if not qtype:
-            if wants_prices and wants_avail:
-                qtype = "product_price_and_availability"
-            elif wants_prices:
-                qtype = "product_pricing"
-            elif wants_avail:
-                qtype = "product_availability"
-
-        # Build task string depending on slots
-        if qtype and product:
-            task = f"{qtype} for product '{product}' in channel '{channel}'."
-        elif product:
-            if qtype == "product_pricing":
-                task = f"Pricing only for '{product}' in channel '{channel}'. Return currency and clearly name each product."
-            elif qtype == "product_availability":
-                task = f"Availability/publication only for '{product}' in channel '{channel}'."
-            else:
-                task = f"Product info (price & availability) for '{product}' in channel '{channel}'. Return currency and clearly name each product."
-        elif qtype == "user_info" and user_id:
-            task = f"User information for '{user_id}' (orders, addresses, availability to purchase)."
-        else:
-            task = user_text or "Answer the user's question using Saleor GraphQL."
-
+    def run(self, dispatcher: CollectingDispatcher, tracker: Tracker, domain: dict) -> List[EventType]:
         try:
-            # Case 1: multiple KG products, no explicit product slot
-            if not product and kg_products and (wants_prices or not qtype):
-                results, queries = [], []
-                for prod in kg_products:
-                    task = f"{qtype or 'product_info'} for product '{prod}' in channel '{channel}'."
-                    res = _tool_loop(task)
-                    results.append(res["answer"])
-                    queries.extend(res["queries"])
+            # Get slots and message text
+            product = (tracker.get_slot("product_name") or "").strip()
+            qtype = (tracker.get_slot("saleor_question_type") or "").strip()
+            channel = (tracker.get_slot("channel_slug") or CHANNEL_SLUG).strip()
+            user_id = (tracker.get_slot("user_identifier") or "").strip()
+            user_text = (tracker.latest_message.get("text") or "").strip()
+            kg_products = tracker.get_slot("kg_products") or []
+            
+            log.info(f"Processing request - product: {product}, qtype: {qtype}, channel: {channel}, "
+                    f"user_id: {user_id}, user_text: {user_text}")
+            
+            # If user asked for prices/availability but didn't name products explicitly,
+            # fall back to KG-derived products from the previous turn.
+            wants_prices = bool(re.search(r"\b(price|prices|cost|buy|purchase|available|availability|in stock)\b", user_text, re.I))
+            wants_avail = bool(re.search(r"\b(available|availability|in stock|stock|purchase|buy)\b", user_text, re.I))
+            log.info(f"Detected - wants_prices: {wants_prices}, wants_avail: {wants_avail}")
 
-                final_answer = "\n".join(results)
-                dispatcher.utter_message(text=final_answer)
-                return [
-                    SlotSet("saleor_last_answer", final_answer),
-                    SlotSet("saleor_last_queries", json.dumps(queries)),
-                    SlotSet("channel_slug", channel),
-                ]
+            # If qtype not provided by NLU/form, infer from text
+            if not qtype:
+                if wants_prices and wants_avail:
+                    qtype = "product_price_and_availability"
+                elif wants_prices:
+                    qtype = "product_pricing"
+                elif wants_avail:
+                    qtype = "product_availability"
+                log.info(f"Inferred qtype: {qtype}")
 
-            # Case 2: single product or general query
+            # Build the question based on available information
+            if qtype and product:
+                question = f"{qtype} for product '{product}' in channel '{channel}'."
+            elif product:
+                if qtype == "product_pricing":
+                    question = f"Pricing only for '{product}' in channel '{channel}'. Return currency and clearly name each product."
+                elif qtype == "product_availability":
+                    question = f"Availability/publication only for '{product}' in channel '{channel}'."
+                else:
+                    question = f"Product info (price & availability) for '{product}' in channel '{channel}'. Return currency and clearly name each product."
+            elif qtype == "user_info" and user_id:
+                question = f"User information for '{user_id}' (orders, addresses, availability to purchase)."
             else:
-                result = _tool_loop(task)
-                dispatcher.utter_message(text=result["answer"])
-                return [
-                    SlotSet("saleor_last_answer", result["answer"]),
-                    SlotSet("saleor_last_queries", json.dumps(result["queries"])),
-                    SlotSet("channel_slug", channel),
-                ]
+                question = user_text or "Answer the user's question using the product catalog."
+
+            log.info(f"Formatted question: {question}")
+            
+            # Use the original user text as the main question
+            question = user_text or "Answer the user's question using the product catalog."
+
+            log.info(f"Formatted question: {question}")
+            
+            # Get KG response from tracker if available
+            # kg_response_slot = tracker.get_slot("kg_response")
+            kg_response_slot = tracker.get_slot("kg_message")
+            kg_response = None
+            
+            if kg_response_slot:
+                log.info(f"Found kg_response_slot: {kg_response_slot}")
+                # Try to parse as JSON first, if it fails keep as string
+                if isinstance(kg_response_slot, str):
+                    try:
+                        # If it's a string, try to parse as JSON
+                        kg_response = json.loads(kg_response_slot)
+                        log.info("Successfully parsed kg_response as JSON")
+                    except json.JSONDecodeError:
+                        # If not valid JSON, use as is
+                        kg_response = kg_response_slot
+                        log.info("Using kg_response as string")
+                else:
+                    # If not a string, use as is
+                    kg_response = kg_response_slot
+                    log.info("Using kg_response as is")
+            
+            log.info(f"Calling API with kg_products: {kg_products}, kg_response: {kg_response is not None}")
+            
+            # Log the data being sent to the API
+            log.info(f"Sending to API - Question: {question}")
+            log.info(f"Sending to API - KG Products: {kg_products}")
+            log.info(f"Sending to API - KG Response: {kg_response}")
+            
+            # Call the API with the question and KG products
+            response = call_saleor_api(
+                question=question,
+                kg_products=kg_products,
+                kg_response=kg_response,
+                session_id=tracker.sender_id,
+                channel=channel
+            )
+
+            log.info(f"API response: {json.dumps(response, indent=2) if isinstance(response, dict) else response}")
+
+            # Handle the response
+            if response and isinstance(response, dict):
+                
+                if "answer" in response:
+                    answer = response["answer"]
+                    log.info(f"Sending answer to user: {answer}")
+                    dispatcher.utter_message(text=answer)
+                    return [
+                        SlotSet("saleor_last_answer", answer),
+                        SlotSet("saleor_last_queries", json.dumps(response.get("queries", []))),
+                        SlotSet("channel_slug", channel),
+                    ]
+                elif "error" in response:
+                    error_msg = f"API error: {response['error']}"
+            else:
+                error_msg = f"Unexpected API response format: {type(response)}"
+            
+            error_msg = error_msg or "No answer returned from the API"
+            log.error(error_msg)
+            raise Exception(error_msg)
 
         except Exception as e:
-            log.exception("Saleor GraphQL action failed: %s", e)
-            err_msg = f"I couldn’t complete the catalog query."
-            if DEV_VERBOSE:
-                err_msg += f" Details: {e}"
-            dispatcher.utter_message(text=err_msg)
+            error_msg = str(e)
+            log.exception(f"Saleor API action failed: {error_msg}")
+            
+            # Provide a more user-friendly error message
+            if "ConnectionError" in error_msg:
+                user_msg = "I'm having trouble connecting to the product catalog. Please check if the backend service is running."
+            elif "Timeout" in error_msg:
+                user_msg = "The request to the product catalog timed out. Please try again in a moment."
+            elif "No answer" in error_msg:
+                user_msg = "I couldn't get a response from the product catalog. The service might be temporarily unavailable."
+            else:
+                user_msg = "I encountered an error while processing your request."
+                if DEV_VERBOSE:
+                    user_msg += f" Technical details: {error_msg}"
+            
+            dispatcher.utter_message(text=user_msg)
             return [
-                SlotSet("saleor_last_error", str(e)),
-                SlotSet("saleor_last_queries", tracker.get_slot("saleor_last_queries")),
+                SlotSet("saleor_last_error", error_msg),
+                SlotSet("saleor_last_queries", tracker.get_slot("saleor_last_queries") or "[]"),
             ]

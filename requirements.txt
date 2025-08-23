@@ -6,4 +6,6 @@ graphql-core
 gql[requests]
 python-dotenv    # optional if you prefer .env files
 neo4j
-
+fastapi
+uvicorn
+langgraph

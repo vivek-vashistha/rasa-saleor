@@ -116,3 +116,10 @@ rasa inspect --debug
 * Ensure `RASA_PRO_LICENSE` is set before running training or serving.
 * You can change the Rasa configuration inside `configs/config.yml`.
 * By default, the Rasa server runs on port **5005**.
+
+
+### Run Saleor API Server
+
+```bash
+python saleor_api/new_salor_api_server.py
+```
